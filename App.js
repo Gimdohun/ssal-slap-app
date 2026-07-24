@@ -457,6 +457,7 @@ const PLAYER_SWING_MS = 55;
 const PLAYER_CONTACT_MS = PLAYER_WINDUP_MS + PLAYER_SWING_MS;
 const PLAYER_FOLLOW_THROUGH_MS = 45;
 const PLAYER_RECOVERY_MS = 120;
+const PLAYER_ATTACK_QUEUE_LIMIT = 4;
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 // 골드는 데미지의 0.75제곱 — 데미지 성장 대비 수입은 완만하게
 const goldFor = (S, dmg) => Math.max(1, Math.round(Math.pow(dmg, 0.75) * BAGS[S.activeBag].goldMul * skinBonus(S) * (goldBoostActive(S) ? 2 : 1)));
@@ -606,8 +607,10 @@ function Game() {
   const foeRecoveryTimer = useRef(null);
   const playerPoseTimer = useRef(null);
   const foePoseTimer = useRef(null);
-  const foeFlickerTimer = useRef(null);
-  const foeCounterTimer = useRef(null);
+  const foeCounterTimers = useRef(new Set());
+  const foeCounterRetryTimer = useRef(null);
+  const pendingFoeCounters = useRef(0);
+  const drainFoeCounterRef = useRef(null);
   const bagPoseTimer = useRef(null);
   const bagBreakTimer = useRef(null);
   const bagBrokenRef = useRef(false);
@@ -621,6 +624,22 @@ function Game() {
   const foeAttackHandIndex = useRef(0);
   const playerAttackLocked = useRef(false);
   const foeAttackLocked = useRef(false);
+  const pendingPlayerAttacks = useRef([]);
+  const playPlayerAttackRef = useRef(null);
+  const playerAttackBeforeContact = useRef(false);
+  const foeAttackBeforeContact = useRef(false);
+  const pendingPlayerReaction = useRef(null);
+  const pendingFoeReaction = useRef(null);
+  const playerReactionNowRef = useRef(null);
+  const foeReactionNowRef = useRef(null);
+
+  const clearFoeCounterWork = useCallback(() => {
+    foeCounterTimers.current.forEach(timer => clearTimeout(timer));
+    foeCounterTimers.current.clear();
+    clearTimeout(foeCounterRetryTimer.current);
+    foeCounterRetryTimer.current = null;
+    pendingFoeCounters.current = 0;
+  }, []);
 
   /* 저장/불러오기 */
   useEffect(() => {
@@ -849,8 +868,7 @@ function Game() {
       foeLoop.stop();
       clearTimeout(playerPoseTimer.current);
       clearTimeout(foePoseTimer.current);
-      clearTimeout(foeFlickerTimer.current);
-      clearTimeout(foeCounterTimer.current);
+      clearFoeCounterWork();
       clearTimeout(bagPoseTimer.current);
       clearTimeout(bagBreakTimer.current);
       clearTimeout(resultTimer.current);
@@ -862,7 +880,7 @@ function Game() {
       clearTimeout(foeContactTimer.current);
       clearTimeout(foeRecoveryTimer.current);
     };
-  }, []);
+  }, [clearFoeCounterWork]);
 
   /* 연출 */
   const stageSize = useRef({ w: Dimensions.get('window').width, h: 300 });
@@ -908,6 +926,18 @@ function Game() {
     }
   }, []);
 
+  const resetImpactMotion = useCallback(() => {
+    stageShake.stopAnimation();
+    stageZoom.stopAnimation();
+    flashAnim.stopAnimation();
+    impactAnim.stopAnimation();
+    stageShake.setValue(0);
+    stageZoom.setValue(1);
+    flashAnim.setValue(0);
+    impactAnim.setValue(0);
+    setImpactCrit(false);
+  }, []);
+
   const holdPlayerPose = useCallback((pose, duration) => {
     const priority = posePriority(pose);
     if (priority < playerPosePriorityRef.current) return false;
@@ -943,24 +973,77 @@ function Game() {
     return true;
   }, []);
 
+  const cancelPlayerAttack = useCallback((clearQueue = true) => {
+    clearTimeout(attackPhaseTimer.current);
+    clearTimeout(playerContactTimer.current);
+    clearTimeout(playerFollowTimer.current);
+    clearTimeout(playerRecoveryTimer.current);
+    attackPhaseTimer.current = null;
+    playerContactTimer.current = null;
+    playerFollowTimer.current = null;
+    playerRecoveryTimer.current = null;
+    playerAttackLocked.current = false;
+    playerAttackBeforeContact.current = false;
+    pendingPlayerReaction.current = null;
+    if (clearQueue) pendingPlayerAttacks.current = [];
+    charAnim.stopAnimation();
+    charAnim.setValue(0);
+  }, []);
+
+  const resetPlayerAttackContext = useCallback(() => {
+    cancelPlayerAttack();
+    clearTimeout(playerPoseTimer.current);
+    playerPoseTimer.current = null;
+    playerPoseRef.current = 'idle';
+    playerPosePriorityRef.current = POSE_PRIORITY.idle;
+    setPlayerPose('idle');
+  }, [cancelPlayerAttack]);
+
   /* 손이 실제로 닿는 한 지점에서 피격·소리·데미지를 함께 발생시킨다. */
   const playPlayerAttack = useCallback((crit = false, onContact = null) => {
-    if (playerAttackLocked.current) return false;
+    if (playerAttackLocked.current) {
+      if (pendingPlayerAttacks.current.length >= PLAYER_ATTACK_QUEUE_LIMIT) return false;
+      pendingPlayerAttacks.current.push({ crit, onContact });
+      return true;
+    }
     const side = playerAttackIndex.current % 2 ? 'Left' : 'Right';
     if (!holdPlayerPose(`windup${side}`, crit ? 380 : 315)) return false;
     playerAttackLocked.current = true;
+    playerAttackBeforeContact.current = true;
     playerAttackIndex.current++;
     clearTimeout(attackPhaseTimer.current);
     clearTimeout(playerContactTimer.current);
     clearTimeout(playerFollowTimer.current);
     clearTimeout(playerRecoveryTimer.current);
+    const finishAndDrain = () => {
+      playerRecoveryTimer.current = null;
+      playerAttackLocked.current = false;
+      const next = pendingPlayerAttacks.current.shift();
+      if (next) playPlayerAttackRef.current?.(next.crit, next.onContact);
+    };
     attackPhaseTimer.current = setTimeout(() => {
       attackPhaseTimer.current = null;
       holdPlayerPose(`slap${side}`, crit ? 270 : 220);
     }, PLAYER_WINDUP_MS);
     playerContactTimer.current = setTimeout(() => {
       playerContactTimer.current = null;
+      playerAttackBeforeContact.current = false;
       onContact?.();
+      const reaction = pendingPlayerReaction.current;
+      if (reaction) {
+        pendingPlayerReaction.current = null;
+        cancelPlayerAttack(false);
+        playerReactionNowRef.current?.(reaction);
+        playerRecoveryTimer.current = setTimeout(finishAndDrain, reaction.holdMs);
+      } else if (pendingPlayerAttacks.current.length > 0) {
+        clearTimeout(playerFollowTimer.current);
+        playerFollowTimer.current = null;
+        clearTimeout(playerRecoveryTimer.current);
+        playerRecoveryTimer.current = setTimeout(
+          finishAndDrain,
+          (crit ? HIT_STOP_CRIT_MS : HIT_STOP_MS) + 35,
+        );
+      }
     }, PLAYER_CONTACT_MS);
     if (crit) {
       playerFollowTimer.current = setTimeout(() => {
@@ -970,10 +1053,7 @@ function Game() {
     }
     const totalMs = PLAYER_CONTACT_MS
       + (crit ? PLAYER_FOLLOW_THROUGH_MS + 170 : PLAYER_RECOVERY_MS);
-    playerRecoveryTimer.current = setTimeout(() => {
-      playerRecoveryTimer.current = null;
-      playerAttackLocked.current = false;
-    }, totalMs);
+    playerRecoveryTimer.current = setTimeout(finishAndDrain, totalMs);
     charAnim.stopAnimation();
     charAnim.setValue(0);
     Animated.sequence([
@@ -983,30 +1063,48 @@ function Game() {
       Animated.timing(charAnim, { toValue: 0, duration: crit ? 160 : PLAYER_RECOVERY_MS, useNativeDriver: true }),
     ]).start();
     return true;
+  }, [holdPlayerPose, cancelPlayerAttack]);
+  playPlayerAttackRef.current = playPlayerAttack;
+
+  const runPlayerReactionNow = useCallback(({ pose, holdMs }) => {
+    if (!holdPlayerPose(pose, holdMs)) return false;
+    charAnim.stopAnimation();
+    charAnim.setValue(0);
+    if (pose === 'hit') {
+      Animated.sequence([
+        Animated.timing(charAnim, { toValue: -1, duration: 75, useNativeDriver: true }),
+        Animated.delay(HIT_STOP_MS),
+        Animated.spring(charAnim, { toValue: 0, friction: 3, tension: 170, useNativeDriver: true }),
+      ]).start();
+    } else {
+      Animated.sequence([
+        Animated.timing(charAnim, { toValue: -1, duration: 90, useNativeDriver: true }),
+        Animated.spring(charAnim, { toValue: 0, friction: 5, tension: 130, useNativeDriver: true }),
+      ]).start();
+    }
+    return true;
   }, [holdPlayerPose]);
+  playerReactionNowRef.current = runPlayerReactionNow;
 
   const playPlayerHit = useCallback((holdMs = 280) => {
-    if (!holdPlayerPose('hit', holdMs)) return false;
-    charAnim.stopAnimation();
-    charAnim.setValue(0);
-    Animated.sequence([
-      Animated.timing(charAnim, { toValue: -1, duration: 75, useNativeDriver: true }),
-      Animated.delay(HIT_STOP_MS),
-      Animated.spring(charAnim, { toValue: 0, friction: 3, tension: 170, useNativeDriver: true }),
-    ]).start();
-    return true;
-  }, [holdPlayerPose]);
+    if (playerAttackLocked.current && playerAttackBeforeContact.current) {
+      pendingPlayerReaction.current = { pose: 'hit', holdMs };
+      return true;
+    }
+    cancelPlayerAttack();
+    return runPlayerReactionNow({ pose: 'hit', holdMs });
+  }, [cancelPlayerAttack, runPlayerReactionNow]);
 
   const playPlayerDodge = useCallback(() => {
-    if (!holdPlayerPose('dodge', 250)) return false;
-    charAnim.stopAnimation();
-    charAnim.setValue(0);
-    Animated.sequence([
-      Animated.timing(charAnim, { toValue: -1, duration: 90, useNativeDriver: true }),
-      Animated.spring(charAnim, { toValue: 0, friction: 5, tension: 130, useNativeDriver: true }),
-    ]).start();
-    return true;
-  }, [holdPlayerPose]);
+    if (playerAttackLocked.current && playerAttackBeforeContact.current) {
+      if (pendingPlayerReaction.current?.pose !== 'hit') {
+        pendingPlayerReaction.current = { pose: 'dodge', holdMs: 250 };
+      }
+      return true;
+    }
+    cancelPlayerAttack();
+    return runPlayerReactionNow({ pose: 'dodge', holdMs: 250 });
+  }, [cancelPlayerAttack, runPlayerReactionNow]);
 
   const resetBagPose = useCallback(() => {
     clearTimeout(bagPoseTimer.current);
@@ -1062,7 +1160,7 @@ function Game() {
     if (crit) dmg *= critMul(S);
     dmg = Math.max(1, Math.round(dmg));
     if (oneShotActive(S)) dmg = Math.max(dmg, S.bagHp); // 샌드백 한 방 버프: 남은 내구도만큼 확정 데미지
-    const attackAccepted = playPlayerAttack(crit, () => {
+    const resolvePunch = () => {
       if (bagBrokenRef.current) return;
       S.punches++;
       S.bagHp -= dmg;
@@ -1078,6 +1176,7 @@ function Game() {
       }
 
       if (S.bagHp <= 0) {
+        pendingPlayerAttacks.current = [];
         S.bagHp = 0;
         bagBrokenRef.current = true;
         clearTimeout(bagPoseTimer.current);
@@ -1104,8 +1203,17 @@ function Game() {
         bagBreakTimer.current = timer;
       }
       rerender();
-    });
-    if (!attackAccepted) return;
+    };
+    // 자동 슬랩 수치는 약속된 주기로 처리하고, 캐릭터가 비어 있을 때만 모션을 재생한다.
+    if (auto && playerAttackLocked.current) {
+      resolvePunch();
+      return;
+    }
+    const attackAccepted = playPlayerAttack(crit, resolvePunch);
+    if (!attackAccepted) {
+      if (auto) resolvePunch();
+      return;
+    }
     // 경고 시작 후 350ms는 반응 유예 — 실제로 시작된 공격만 반격 판정에 포함한다.
     if (!auto && warningRef.current && Date.now() - warningStartedAt.current > 350) punchedInWarningRef.current = true;
   }, [inBattle, addFloat, playPlayerAttack, playBagHit, impactFx, rerender, save, showInterstitial]);
@@ -1160,10 +1268,10 @@ function Game() {
   const startBattle = (mode, foe, meta) => {
     const pMax = playerMaxHp(S);
     resetBagPose();
+    resetImpactMotion();
     clearTimeout(playerPoseTimer.current);
     clearTimeout(foePoseTimer.current);
-    clearTimeout(foeFlickerTimer.current);
-    clearTimeout(foeCounterTimer.current);
+    clearFoeCounterWork();
     clearTimeout(resultTimer.current);
     clearTimeout(attackPhaseTimer.current);
     clearTimeout(playerContactTimer.current);
@@ -1174,8 +1282,21 @@ function Game() {
     clearTimeout(foeRecoveryTimer.current);
     playerPoseTimer.current = null;
     foePoseTimer.current = null;
-    foeFlickerTimer.current = null;
     resultTimer.current = null;
+    attackPhaseTimer.current = null;
+    playerContactTimer.current = null;
+    playerFollowTimer.current = null;
+    playerRecoveryTimer.current = null;
+    foePhaseTimer.current = null;
+    foeContactTimer.current = null;
+    foeRecoveryTimer.current = null;
+    pendingPlayerAttacks.current = [];
+    pendingPlayerReaction.current = null;
+    pendingFoeReaction.current = null;
+    playerAttackBeforeContact.current = false;
+    foeAttackBeforeContact.current = false;
+    playerAttackLocked.current = false;
+    foeAttackLocked.current = false;
     charAnim.stopAnimation();
     bagAnim.stopAnimation();
     foeAnim.stopAnimation();
@@ -1204,16 +1325,56 @@ function Game() {
   const battleRef = useRef(battle);
   battleRef.current = battle;
 
+  const cancelFoeAttack = useCallback(() => {
+    clearTimeout(foePhaseTimer.current);
+    clearTimeout(foeContactTimer.current);
+    clearTimeout(foeRecoveryTimer.current);
+    foePhaseTimer.current = null;
+    foeContactTimer.current = null;
+    foeRecoveryTimer.current = null;
+    foeAttackLocked.current = false;
+    foeAttackBeforeContact.current = false;
+    pendingFoeReaction.current = null;
+  }, []);
+
   /* 상대도 2단 모션: windup 예비동작(100ms) 후 슬랩 — 예비동작이 커서 회피 타이밍이 보인다 */
-  const playFoeAttack = useCallback(() => {
+  const playFoeAttack = useCallback((onContact = null) => {
+    if (foeAttackLocked.current) return false;
     if (!holdFoePose('windup', 330)) return false;
+    foeAttackLocked.current = true;
+    foeAttackBeforeContact.current = true;
     const pose = foeAttackHandIndex.current % 2 ? 'attackRightHand' : 'attackLeftHand';
     foeAttackHandIndex.current++;
     clearTimeout(foePhaseTimer.current);
+    clearTimeout(foeContactTimer.current);
+    clearTimeout(foeRecoveryTimer.current);
     foePhaseTimer.current = setTimeout(() => {
       foePhaseTimer.current = null;
       holdFoePose(pose, 200);
     }, 100);
+    foeContactTimer.current = setTimeout(() => {
+      foeContactTimer.current = null;
+      foeAttackBeforeContact.current = false;
+      onContact?.();
+      const reaction = pendingFoeReaction.current;
+      if (reaction) {
+        pendingFoeReaction.current = null;
+        cancelFoeAttack();
+        foeReactionNowRef.current?.(reaction);
+        if (pendingFoeCounters.current > 0) {
+          clearTimeout(foeCounterRetryTimer.current);
+          foeCounterRetryTimer.current = setTimeout(() => {
+            foeCounterRetryTimer.current = null;
+            drainFoeCounterRef.current?.();
+          }, reaction.holdMs);
+        }
+      }
+    }, 155);
+    foeRecoveryTimer.current = setTimeout(() => {
+      foeRecoveryTimer.current = null;
+      foeAttackLocked.current = false;
+      if (pendingFoeCounters.current > 0) drainFoeCounterRef.current?.();
+    }, 325);
     foeAnim.stopAnimation();
     foeAnim.setValue(0);
     Animated.sequence([
@@ -1223,49 +1384,54 @@ function Game() {
       Animated.timing(foeAnim, { toValue: 0, duration: 130, useNativeDriver: true }),
     ]).start();
     return true;
+  }, [holdFoePose, cancelFoeAttack]);
+
+  const runFoeReactionNow = useCallback(({ pose, holdMs }) => {
+    if (!holdFoePose(pose, holdMs)) return false;
+    foeAnim.stopAnimation();
+    foeAnim.setValue(0);
+    if (pose === 'hit') {
+      Animated.sequence([
+        Animated.timing(foeAnim, { toValue: 1, duration: 60, useNativeDriver: true }),
+        Animated.delay(HIT_STOP_MS), // 뺨 돌아간 채 멈칫
+        Animated.spring(foeAnim, { toValue: 0, friction: 3, tension: 180, useNativeDriver: true }),
+      ]).start();
+    } else {
+      Animated.sequence([
+        Animated.timing(foeAnim, { toValue: 1, duration: 85, useNativeDriver: true }),
+        Animated.spring(foeAnim, { toValue: 0, friction: 5, tension: 130, useNativeDriver: true }),
+      ]).start();
+    }
+    return true;
   }, [holdFoePose]);
+  foeReactionNowRef.current = runFoeReactionNow;
 
   const playFoeHit = useCallback(() => {
-    const wasHit = foePoseRef.current === 'hit';
-    if (!holdFoePose('hit', 250)) return false;
-    // 연타로 이미 hit 포즈인 상태에서 또 맞으면 idle을 한 프레임 끼워 넣어
-    // 매 타격이 눈에 보이게 한다 (hit 이미지가 정지화면처럼 유지되는 것 방지)
-    if (wasHit) {
-      clearTimeout(foeFlickerTimer.current);
-      setFoePose('idle');
-      foeFlickerTimer.current = setTimeout(() => {
-        foeFlickerTimer.current = null;
-        if (foePoseRef.current === 'hit') setFoePose('hit');
-      }, 50);
+    if (foeAttackLocked.current && foeAttackBeforeContact.current) {
+      pendingFoeReaction.current = { pose: 'hit', holdMs: 250 };
+      return true;
     }
-    foeAnim.stopAnimation();
-    foeAnim.setValue(0);
-    Animated.sequence([
-      Animated.timing(foeAnim, { toValue: 1, duration: 60, useNativeDriver: true }),
-      Animated.delay(HIT_STOP_MS), // 뺨 돌아간 채 멈칫
-      Animated.spring(foeAnim, { toValue: 0, friction: 3, tension: 180, useNativeDriver: true }),
-    ]).start();
-    return true;
-  }, [holdFoePose]);
+    cancelFoeAttack();
+    return runFoeReactionNow({ pose: 'hit', holdMs: 250 });
+  }, [cancelFoeAttack, runFoeReactionNow]);
 
   const playFoeDodge = useCallback((holdMs = 260) => {
-    if (!holdFoePose('dodge', holdMs)) return false;
-    foeAnim.stopAnimation();
-    foeAnim.setValue(0);
-    Animated.sequence([
-      Animated.timing(foeAnim, { toValue: 1, duration: 85, useNativeDriver: true }),
-      Animated.spring(foeAnim, { toValue: 0, friction: 5, tension: 130, useNativeDriver: true }),
-    ]).start();
-    return true;
-  }, [holdFoePose]);
+    if (foeAttackLocked.current && foeAttackBeforeContact.current) {
+      if (pendingFoeReaction.current?.pose !== 'hit') {
+        pendingFoeReaction.current = { pose: 'dodge', holdMs };
+      }
+      return true;
+    }
+    cancelFoeAttack();
+    return runFoeReactionNow({ pose: 'dodge', holdMs });
+  }, [cancelFoeAttack, runFoeReactionNow]);
 
   const endBattle = useCallback((win, playerTerminalDelay = 0) => {
     const b = battleRef.current;
     if (!b || b.over) return;
     clearTimeout(playerPoseTimer.current);
     clearTimeout(foePoseTimer.current);
-    clearTimeout(foeFlickerTimer.current);
-    clearTimeout(foeCounterTimer.current);
+    clearFoeCounterWork();
     clearTimeout(resultTimer.current);
     clearTimeout(attackPhaseTimer.current);
     clearTimeout(playerContactTimer.current);
@@ -1276,9 +1442,21 @@ function Game() {
     clearTimeout(foeRecoveryTimer.current);
     playerPoseTimer.current = null;
     foePoseTimer.current = null;
-    foeFlickerTimer.current = null;
-    foeCounterTimer.current = null;
     resultTimer.current = null;
+    attackPhaseTimer.current = null;
+    playerContactTimer.current = null;
+    playerFollowTimer.current = null;
+    playerRecoveryTimer.current = null;
+    foePhaseTimer.current = null;
+    foeContactTimer.current = null;
+    foeRecoveryTimer.current = null;
+    pendingPlayerAttacks.current = [];
+    pendingPlayerReaction.current = null;
+    pendingFoeReaction.current = null;
+    playerAttackBeforeContact.current = false;
+    foeAttackBeforeContact.current = false;
+    playerAttackLocked.current = false;
+    foeAttackLocked.current = false;
     b.over = win ? 'win' : 'lose';
     playerPosePriorityRef.current = POSE_PRIORITY.terminal;
     foePosePriorityRef.current = POSE_PRIORITY.terminal;
@@ -1313,77 +1491,110 @@ function Game() {
     setShowResult(false);
     setBattle({ ...b });
     resultTimer.current = setTimeout(() => setShowResult(true), 650);
-  }, [save]);
+  }, [save, clearFoeCounterWork]);
 
   const foeHitPlayer = useCallback(() => {
     const b = battleRef.current;
     if (!b || b.over) return;
-    if (!playFoeAttack()) return;
-    if (Math.random() * 100 < dodgePct(S)) {
-      playPlayerDodge();
-      addFloat('회피!', 'info', 'left', ICONS.dodge);
+    if (pendingFoeCounters.current > 0) {
+      drainFoeCounterRef.current?.();
       return;
     }
-    playPlayerHit();
-    let dmg = b.dmg;
-    if (Math.random() * 100 < b.crit) dmg *= b.critMul;
-    dmg = Math.max(1, Math.round(dmg));
-    b.pHp -= dmg;
-    addFloat(fmt(dmg), 'crit', 'left');
-    if (b.pHp <= 0) endBattle(false);
-    else setBattle({ ...b });
-  }, [addFloat, playFoeAttack, playPlayerDodge, playPlayerHit, endBattle]);
+    playFoeAttack(() => {
+      const active = battleRef.current;
+      if (!active || active.over) return;
+      if (Math.random() * 100 < dodgePct(S)) {
+        playPlayerDodge();
+        addFloat('회피!', 'info', 'left', ICONS.dodge);
+        return;
+      }
+      const foeCrit = Math.random() * 100 < active.crit;
+      playPlayerHit();
+      impactFx(foeCrit);
+      playPunchSfx(S.punchSfx, S.sfxVolume);
+      let dmg = active.dmg * (foeCrit ? active.critMul : 1);
+      dmg = Math.max(1, Math.round(dmg));
+      active.pHp -= dmg;
+      addFloat(fmt(dmg), foeCrit ? 'crit' : 'normal', 'left');
+      if (active.pHp <= 0) endBattle(false);
+      else setBattle({ ...active });
+    });
+  }, [addFloat, playFoeAttack, playPlayerDodge, playPlayerHit, impactFx, endBattle]);
 
   // 회피 반격 — MISS가 뜨면 반드시 발동 (포즈 겹침으로 증발하지 않음).
   // 단, 플레이어 회피율만큼은 피할 수 있다.
-  const foeCounterAttack = useCallback(() => {
+  const drainFoeCounters = useCallback(() => {
+    clearTimeout(foeCounterRetryTimer.current);
+    foeCounterRetryTimer.current = null;
+    if (pendingFoeCounters.current <= 0) return;
     const b = battleRef.current;
-    if (!b || b.over) return;
-    playFoeAttack();
-    if (Math.random() * 100 < dodgePct(S)) {
-      playPlayerDodge();
-      addFloat('회피!', 'info', 'left', ICONS.dodge);
+    if (!b || b.over) {
+      pendingFoeCounters.current = 0;
       return;
     }
-    playPlayerHit();
-    let dmg = b.dmg;
-    if (Math.random() * 100 < b.crit) dmg *= b.critMul;
-    dmg = Math.max(1, Math.round(dmg));
-    b.pHp -= dmg;
-    addFloat(fmt(dmg), 'crit', 'left');
-    if (b.pHp <= 0) endBattle(false);
-    else setBattle({ ...b });
-  }, [addFloat, playFoeAttack, playPlayerDodge, playPlayerHit, endBattle]);
+    const accepted = playFoeAttack(() => {
+      const active = battleRef.current;
+      if (!active || active.over) return;
+      if (Math.random() * 100 < dodgePct(S)) {
+        playPlayerDodge();
+        addFloat('회피!', 'info', 'left', ICONS.dodge);
+        return;
+      }
+      const foeCrit = Math.random() * 100 < active.crit;
+      playPlayerHit();
+      impactFx(foeCrit);
+      playPunchSfx(S.punchSfx, S.sfxVolume);
+      let dmg = active.dmg * (foeCrit ? active.critMul : 1);
+      dmg = Math.max(1, Math.round(dmg));
+      active.pHp -= dmg;
+      addFloat(fmt(dmg), foeCrit ? 'crit' : 'normal', 'left');
+      if (active.pHp <= 0) endBattle(false);
+      else setBattle({ ...active });
+    });
+    if (accepted) pendingFoeCounters.current--;
+    else {
+      foeCounterRetryTimer.current = setTimeout(() => {
+        foeCounterRetryTimer.current = null;
+        drainFoeCounterRef.current?.();
+      }, 80);
+    }
+  }, [addFloat, playFoeAttack, playPlayerDodge, playPlayerHit, impactFx, endBattle]);
+  drainFoeCounterRef.current = drainFoeCounters;
 
   const playerHitFoe = useCallback((mult = 1) => {
     const b = battleRef.current;
     if (!b || b.over) return;
     const crit = Math.random() * 100 < critPct(S); // 정타 여부에 따라 공격 모션이 달라지므로 먼저 굴린다
-    const attackAccepted = playPlayerAttack(crit);
+    const attackAccepted = playPlayerAttack(crit, () => {
+      const active = battleRef.current;
+      if (!active || active.over) return;
+      if (active.mode !== 'sandbox' && Math.random() * 100 < active.dodge) {
+        playFoeDodge(150);
+        addFloat('MISS', 'info');
+        const counterTimer = setTimeout(() => {
+          foeCounterTimers.current.delete(counterTimer);
+          const current = battleRef.current;
+          if (!current || current.over) return;
+          pendingFoeCounters.current++;
+          drainFoeCounterRef.current?.();
+        }, 170);
+        foeCounterTimers.current.add(counterTimer);
+        return;
+      }
+      let dmg = baseDamage(S) * mult;
+      if (crit) dmg *= critMul(S);
+      dmg = Math.max(1, Math.round(dmg));
+      addFloat(crit ? `찰싹!! ${fmt(dmg)}` : fmt(dmg), crit ? 'crit' : 'normal');
+      playFoeHit();
+      impactFx(crit);
+      playPunchSfx(S.punchSfx, S.sfxVolume);
+      if (active.mode === 'sandbox') return;
+      active.hp -= dmg;
+      if (active.hp <= 0) endBattle(true, LETHAL_ATTACK_HOLD_MS);
+      else setBattle({ ...active });
+    });
     if (!attackAccepted) return;
-    if (b.mode !== 'sandbox' && Math.random() * 100 < b.dodge) {
-      playFoeDodge(150); // 짧게 피하고
-      addFloat('MISS', 'info');
-      // 즉시 공격 모션과 함께 확정 반격 (무지성 연타 견제)
-      clearTimeout(foeCounterTimer.current);
-      foeCounterTimer.current = setTimeout(() => {
-        foeCounterTimer.current = null;
-        foeCounterAttack();
-      }, 170);
-      return;
-    }
-    let dmg = baseDamage(S) * mult;
-    if (crit) dmg *= critMul(S);
-    dmg = Math.max(1, Math.round(dmg));
-    addFloat(crit ? `찰싹!! ${fmt(dmg)}` : fmt(dmg), crit ? 'crit' : 'normal');
-    playFoeHit();
-    impactFx(crit);
-    playPunchSfx(S.punchSfx, S.sfxVolume);
-    if (b.mode === 'sandbox') return; // 샌드박스: 상대가 쓰러지지 않는다 (무한 연타)
-    b.hp -= dmg;
-    if (b.hp <= 0) endBattle(true, attackAccepted ? LETHAL_ATTACK_HOLD_MS : 0);
-    else setBattle({ ...b });
-  }, [addFloat, playPlayerAttack, playFoeDodge, playFoeHit, impactFx, endBattle, foeCounterAttack]);
+  }, [addFloat, playPlayerAttack, playFoeDodge, playFoeHit, impactFx, endBattle]);
 
   /* 대련 자동 진행 루프 — 플레이어 공격은 수동 연타 전용, 적만 자동 공격 (샌드박스는 적이 공격 안 함) */
   const battleActive = !!battle && !battle.over;
@@ -1405,6 +1616,7 @@ function Game() {
   };
   const buyBag = idx => {
     if (idx !== S.bagLevel + 1 || idx >= BAGS.length || S.gold < BAGS[idx].cost) return;
+    resetPlayerAttackContext();
     S.gold -= BAGS[idx].cost;
     S.bagLevel = idx;
     S.activeBag = idx;
@@ -1416,14 +1628,18 @@ function Game() {
   /* 보유 중인 이전 티어 샌드백 선택 */
   const selectBag = idx => {
     if (idx > S.bagLevel || idx === S.activeBag) return;
+    resetPlayerAttackContext();
     S.activeBag = idx;
     S.bagHp = BAGS[idx].hp;
     resetBagPose();
     save(); rerender();
   };
   const pickSkin = skin => {
-    if (S.ownedSkins.includes(skin.id)) S.skin = skin.id;
-    else if (S.gold >= skin.cost) {
+    if (S.ownedSkins.includes(skin.id)) {
+      resetPlayerAttackContext();
+      S.skin = skin.id;
+    } else if (S.gold >= skin.cost) {
+      resetPlayerAttackContext();
       S.gold -= skin.cost;
       S.ownedSkins.push(skin.id);
       S.skin = skin.id;
@@ -1434,16 +1650,33 @@ function Game() {
 
   const closeBattle = () => {
     resetBagPose();
+    resetImpactMotion();
     clearTimeout(playerPoseTimer.current);
     clearTimeout(foePoseTimer.current);
-    clearTimeout(foeFlickerTimer.current);
-    clearTimeout(foeCounterTimer.current);
+    clearFoeCounterWork();
     clearTimeout(resultTimer.current);
+    clearTimeout(attackPhaseTimer.current);
+    clearTimeout(playerContactTimer.current);
+    clearTimeout(playerFollowTimer.current);
+    clearTimeout(playerRecoveryTimer.current);
+    clearTimeout(foePhaseTimer.current);
+    clearTimeout(foeContactTimer.current);
+    clearTimeout(foeRecoveryTimer.current);
     playerPoseTimer.current = null;
     foePoseTimer.current = null;
-    foeFlickerTimer.current = null;
-    foeCounterTimer.current = null;
     resultTimer.current = null;
+    attackPhaseTimer.current = null;
+    playerContactTimer.current = null;
+    playerFollowTimer.current = null;
+    playerRecoveryTimer.current = null;
+    foePhaseTimer.current = null;
+    foeContactTimer.current = null;
+    foeRecoveryTimer.current = null;
+    pendingPlayerAttacks.current = [];
+    pendingPlayerReaction.current = null;
+    pendingFoeReaction.current = null;
+    playerAttackBeforeContact.current = false;
+    foeAttackBeforeContact.current = false;
     charAnim.stopAnimation();
     foeAnim.stopAnimation();
     charAnim.setValue(0);
@@ -1514,7 +1747,10 @@ function Game() {
             <Image source={battle.background} style={{ width: '100%', height: '100%' }} resizeMode="cover" fadeDuration={0} />
           </View>
 
-          <View style={st.fighter}>
+          <View style={[
+            st.fighter,
+            (playerPose === 'slapLeft' || playerPose === 'slapRight') && st.playerSlapFront,
+          ]}>
             {!sandboxBattle && <View style={st.hpTrack}><View style={[st.hpFill, { width: `${Math.max(0, battle.pHp / battle.pMax * 100)}%`, backgroundColor: C.accent }]} /></View>}
             <Animated.Image source={playerPoseSource(S.skin, playerPose)} fadeDuration={0} resizeMode="contain"
               style={[st.fighterImg, {
@@ -1522,15 +1758,18 @@ function Game() {
                 transform: [
                   { translateY: !battle.over && playerPose === 'idle' ? playerIdleAnim.interpolate({ inputRange: [0, 1], outputRange: [2, -5] }) : 0 },
                   { translateY: battle.over === 'lose' ? 14 : 0 },
-                  { translateX: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-34, 0, 55] }) },
-                  { rotate: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-16deg', '0deg', '14deg'] }) },
+                  { translateX: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-10, 0, 18] }) },
+                  { rotate: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-7deg', '0deg', '9deg'] }) },
                   { rotate: battle.over === 'lose' ? '-10deg' : '0deg' },
                 ],
               }]} />
             <Text style={st.fighterName}>쌀알이</Text>
           </View>
 
-          <View style={st.fighter}>
+          <View style={[
+            st.fighter,
+            (foePose === 'attackLeftHand' || foePose === 'attackRightHand') && st.foeSlapFront,
+          ]}>
             {!sandboxBattle && <View style={st.hpTrack}><View style={[st.hpFill, { width: `${Math.max(0, battle.hp / battle.maxHp * 100)}%`, backgroundColor: C.danger }]} /></View>}
             <Animated.Image source={battle.poses?.[foePose] ?? battle.img} fadeDuration={0} resizeMode="contain"
               style={[st.fighterImg, battle.id === 'ricebag_king' && st.colossalFoeImg, {
@@ -1540,14 +1779,25 @@ function Game() {
                   { translateY: battle.id === 'ricebag_king' ? -14 : 0 },
                   { translateY: !battle.over && foePose === 'idle' ? foeIdleAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -5] }) : 0 },
                   { translateY: battle.over === 'win' ? 14 : 0 },
-                  { translateX: foeAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-40, 0, 26] }) },
-                  { rotate: foeAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-12deg', '0deg', '10deg'] }) },
+                  { translateX: foeAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-18, 0, 12] }) },
+                  { rotate: foeAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-8deg', '0deg', '7deg'] }) },
                   { rotate: battle.over === 'win' ? '10deg' : '0deg' },
                 ],
               }]} />
             <Text style={st.fighterName}>{battle.name}</Text>
           </View>
 
+          <Animated.Image
+            pointerEvents="none"
+            source={impactCrit ? EFFECTS.impactCrit : EFFECTS.impact}
+            style={[st.impactBurst, st.battleImpact, {
+              opacity: impactAnim,
+              transform: [
+                { scale: impactAnim.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1.35] }) },
+                { rotate: impactAnim.interpolate({ inputRange: [0, 1], outputRange: ['-12deg', '8deg'] }) },
+              ],
+            }]}
+          />
           {floats.map(f => <FloatingText key={f.id} item={f} onDone={removeFloat} />)}
           <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: '#fff', opacity: flashAnim, zIndex: 40 }]} />
 
@@ -1683,8 +1933,8 @@ function Game() {
             opacity: stunned ? 0.5 : 1,
             transform: [
               { translateY: playerPose === 'idle' ? playerIdleAnim.interpolate({ inputRange: [0, 1], outputRange: [2, -5] }) : 0 },
-              { translateX: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-34, 0, 55] }) },
-              { rotate: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-16deg', '0deg', '14deg'] }) },
+              { translateX: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: [-10, 0, 18] }) },
+              { rotate: charAnim.interpolate({ inputRange: [-1, 0, 1], outputRange: ['-7deg', '0deg', '9deg'] }) },
             ],
           }]} />
         {stunned && <Image source={ICONS.stun} style={st.stunStars} resizeMode="contain" />}
@@ -1705,6 +1955,17 @@ function Game() {
             style={[st.bagImg, bagPose === 'broken' && st.bagBroken]} resizeMode="contain" />
         </Animated.View>
 
+        <Animated.Image
+          pointerEvents="none"
+          source={impactCrit ? EFFECTS.impactCrit : EFFECTS.impact}
+          style={[st.impactBurst, st.trainImpact, {
+            opacity: impactAnim,
+            transform: [
+              { scale: impactAnim.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1.35] }) },
+              { rotate: impactAnim.interpolate({ inputRange: [0, 1], outputRange: ['-12deg', '8deg'] }) },
+            ],
+          }]}
+        />
         {floats.map(f => <FloatingText key={f.id} item={f} onDone={removeFloat} />)}
         <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: '#fff', opacity: flashAnim, zIndex: 40 }]} />
       </AnimatedPressable>
@@ -1871,6 +2132,8 @@ const st = StyleSheet.create({
   hpFill: { height: '100%', borderRadius: 4 },
 
   fighter: { alignItems: 'center', width: '42%' },
+  playerSlapFront: { zIndex: 13, elevation: 13 },
+  foeSlapFront: { zIndex: 12, elevation: 12 },
   fighterImg: { width: 130, height: 130 },
   colossalFoeImg: { width: 340, height: 340, marginVertical: -105 },
   fighterName: {
@@ -1878,6 +2141,11 @@ const st = StyleSheet.create({
     zIndex: 20,
     textShadowColor: 'rgba(0,0,0,0.75)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3,
   },
+  impactBurst: {
+    position: 'absolute', width: 92, height: 92, zIndex: 35, elevation: 35,
+  },
+  battleImpact: { left: '44%', top: '34%' },
+  trainImpact: { left: '53%', top: '31%' },
 
   resultOverlay: {
     ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(255,255,255,0.92)',

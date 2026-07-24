@@ -11,3 +11,10 @@ Composition/framing: exact 3-by-3 grid of nine equal square cells with straight,
 Action direction: both slap cells show a decisive SIDEWAYS SWING using one large readable OPEN PALM, fingers together, plus a broad curved coral/orange motion arc and follow-through. The palm travels laterally across the body; never presses, braces, shoves, or pushes an invisible wall. Windup stores visible rotational energy.
 Constraints: one identical nurungji mascot per used cell; identical face, disk silhouette, flecks, brown jacket, tie, palette, and line weight; dot eyes, simple mouths, coral cheeks; no labels, text, numbers, captions, watermark, UI, border, or extra objects. Bottom-middle and bottom-right contain only flat #00ff00.
 Avoid: realistic human face/anatomy/proportions, hair, wig, moustache, eyebrows, detailed fingers, realistic suit body, pants, shoes, anime/game-promo painting, 3D, dramatic light, cast shadows, semi-transparent effects, frontal pushing pose, two hands pressing forward.
+
+## Targeted correction prompt (one pass)
+
+Use case: precise-object-edit
+Input images: Image 1 is the exact atlas edit target; Image 2 is the open-palm slap reference; Image 3 is the original emotional-style reference.
+Primary request: Change only the MIDDLE-LEFT cell (row 2, column 1). Replace its unclear fist/turn gesture with a decisive horizontal slap toward image-left, ending in one large clearly visible OPEN PALM with fingers together and a connected wrist, plus a broad curved coral/orange arc and follow-through.
+Invariants: preserve the other eight cells, exact grid, solid #00ff00 field, two empty cells, and the same round golden disk, toasted flecks, face, brown jacket, orange tie, scale, palette, and line weight. No push, punch, invisible wall, text, hair, realistic anatomy, shadows, or extra objects.

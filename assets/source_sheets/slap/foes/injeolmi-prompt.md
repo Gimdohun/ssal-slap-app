@@ -11,3 +11,10 @@ Composition/framing: exact 3-by-3 grid of nine equal square cells with straight,
 Action direction: both slap cells show a decisive SIDEWAYS SWING using one large readable OPEN PALM, fingers together, plus a broad curved coral/orange motion arc and follow-through. The palm travels laterally; never presses or pushes an invisible wall.
 Constraints: identical square injeolmi, powder speckles, face, gold jacket, coral tie, palette, and line weight across all poses; dot eyes, simple mouths, coral cheeks; no text, labels, watermark, UI, border, extra objects. Bottom-middle and bottom-right contain only #00ff00.
 Avoid: realistic human face/anatomy, hair, wig, eyebrows, detailed hands, realistic suit body, pants, shoes, anime/game-promo painting, 3D, flying powder clouds, dramatic light, cast shadows, semi-transparent effects, frontal pushing, two hands pressing forward.
+
+## Targeted correction prompt (one pass)
+
+Use case: precise-object-edit
+Input images: Image 1 is the exact atlas edit target; Image 2 is the authoritative slap and hit-expression reference; Image 3 is the original emotional-style reference.
+Primary request: Correct only two cells whose actions are misplaced. MIDDLE-LEFT (row 2, column 1) must become slap_right: a decisive horizontal slap toward image-left ending in one large clearly readable OPEN PALM with fingers together, a connected wrist, and broad curved coral/orange arc. MIDDLE-CENTER (row 2, column 2) must become exaggerated hit: cheek visibly squashed sideways by impact, squeezed simple eyes, tiny shocked mouth, and two or three small blue sweat drops, with no slap arc and no attacking palm.
+Invariants: preserve the other seven cells, exact grid, solid #00ff00 field, two empty cells, and the same rounded square soybean-powder body, speckles, gold jacket, coral tie, scale, palette, and charcoal line weight in both changed cells. No push, punch, invisible wall, text, hair, realistic anatomy, shadows, powder clouds, or extra objects.

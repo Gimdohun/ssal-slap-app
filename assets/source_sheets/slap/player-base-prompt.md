@@ -1,6 +1,7 @@
 # Player base sprite prompt
 
-Generated with the built-in `image_gen` tool on 2026-07-24.
+Generated with the built-in `image_gen` tool on 2026-07-24 and white-tone
+corrected with the same built-in tool on 2026-07-25.
 
 ## Inputs
 
@@ -27,3 +28,23 @@ The slap must travel laterally into an off-screen opponent with a curved coral m
 - Runtime cells: 512x512 RGBA
 - Background removal: installed `remove_chroma_key.py` helper with soft matte, despill, and one-pixel edge contraction
 - All four corners and the outer two-pixel border must have alpha 0
+- Rebuild command: `py -3 rebuild_runtime_sprites.py`
+- Grid dividers are detected from their actual pixels; the rebuild never assumes equal thirds
+
+## White-tone revision prompt (2026-07-25)
+
+Use case: precise-object-edit
+
+Asset type: production 3x3 sprite atlas for a mobile game
+
+Input images: Image 1 is the edit target atlas; Image 2 is the original
+rice-grain mascot white-tone reference.
+
+Primary request: change only exposed body/skin from cream/yellow ivory to clean
+soft-white rice tone `#FFFDF8`, with highlights `#FFFFFF` and extremely subtle
+neutral pale-gray shading around `#F4F0E8`. The body must not read beige, tan,
+yellow, or gray.
+
+Preserve every pose, silhouette, proportion, facial feature, cheek, outfit,
+motion arc, cell order, green background, 3x3 layout, and gutter. Color
+correction only; no redraw, border, or crop.

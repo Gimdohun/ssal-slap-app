@@ -11,3 +11,10 @@ Composition/framing: exact 3-by-3 grid of nine equal square cells with straight,
 Action direction: both slap cells show a decisive SIDEWAYS SWING using one large readable OPEN PALM, fingers together, plus a broad curved coral/orange motion arc and follow-through. The palm moves laterally; never presses or pushes an invisible wall.
 Constraints: identical elongated white rice cake, face, navy coat, gold trim/tie, palette, and line weight across all seven poses; dot eyes, simple mouths, coral cheeks; no text, labels, watermark, UI, border, extra objects. Bottom-middle and bottom-right contain only #00ff00.
 Avoid: realistic human face/head/anatomy, hair, sideburns, eyebrows, detailed fingers, realistic suit body, pants, shoes, anime/game-promo painting, 3D, dramatic light, cast shadows, translucent effects, frontal pushing, two hands pressing forward.
+
+## Targeted correction prompt (one pass)
+
+Use case: precise-object-edit
+Input images: Image 1 is the exact atlas edit target; Image 2 is the open-palm slap reference; Image 3 is the original emotional-style reference.
+Primary request: Change only the MIDDLE-LEFT cell (row 2, column 1). Replace its unclear fist/turn gesture with a decisive horizontal slap toward image-left, ending in one large clearly visible OPEN PALM with fingers together and a connected wrist, plus a broad curved coral/orange arc and follow-through.
+Invariants: preserve the other eight cells, exact grid, solid #00ff00 field, two empty cells, and the same elongated white rice cake, face, navy coat, gold trim/tie, scale, palette, and line weight. No push, punch, invisible wall, text, hair, realistic anatomy, shadows, or extra objects.
