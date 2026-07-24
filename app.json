@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "app.ssalslap.mobile",
-      "buildNumber": "1"
+      "buildNumber": "2"
     },
     "android": {
       "package": "app.ssalslap.mobile",
