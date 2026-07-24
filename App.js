@@ -102,6 +102,11 @@ const ICONS = {
   dodge: require('./assets/icons/effect_dodge.png'),
 };
 
+const EFFECTS = {
+  impact: require('./assets/effects/effect_impact.png'),
+  impactCrit: require('./assets/effects/effect_impact_crit.png'),
+};
+
 /* ───────── 스탯 (러닝타임 목표: 하루 8시간 × 3개월 — 비용 성장 가파르게) ───────── */
 const STATS = {
   // 2026-07 전면 재조정: 코스트 배율을 낮추고 렙을 많이 사게(장르 관행), %스탯은 소폭+낮은 캡
@@ -138,9 +143,9 @@ const BAGS = [
 ];
 const LEGACY_BAG_HP = [200, 1.5e3, 1.2e4, 1e5, 9e5, 8e6, 7e7, 6e8, 5e9, 4e10];
 const BAG_SCHEMA_VERSION = 2;
-const BAG_HIT_HOLD_MS = 120;
+const BAG_HIT_HOLD_MS = 50;
 const BAG_HIT_THROTTLE_MS = 180;
-const BAG_HEADBACK_MS = 150;   // 일반 타격 머리 젖힘 프레임 유지 시간 (권장 120~180ms)
+const BAG_HEADBACK_MS = 120;   // 접촉 프레임 뒤 머리가 젖힌 상태를 유지하는 시간
 const BAG_BREAK_MS = 800;      // 격파(X눈) 프레임 유지 + 입력 잠금 시간
 
 /* ───────── 캐릭터 포즈 ─────────
@@ -396,8 +401,8 @@ const AD_FREE_SKU = IAP_SKU_PREFIX + 'ad_free';
 const AD_UNIT_INTERSTITIAL = __DEV__
   ? TestIds.INTERSTITIAL
   : Platform.select({
-      ios: 'ca-app-pub-3940256099942544/4411468910',
-      android: 'ca-app-pub-3940256099942544/1033173712',
+      ios: 'ca-app-pub-8467967363800822/5792957116',
+      android: 'ca-app-pub-8467967363800822/7944211800',
     });
 const goldBoostActive = S => Date.now() < S.goldBoostUntil;
 const oneShotActive   = S => Date.now() < S.oneShotUntil;
@@ -447,6 +452,11 @@ const LETHAL_ATTACK_HOLD_MS = 180;
 /* 과장 연출 상수 — 타격 순간 잠깐 멈칫(히트스톱), 정타는 더 길게 */
 const HIT_STOP_MS = 40;
 const HIT_STOP_CRIT_MS = 70;
+const PLAYER_WINDUP_MS = 95;
+const PLAYER_SWING_MS = 55;
+const PLAYER_CONTACT_MS = PLAYER_WINDUP_MS + PLAYER_SWING_MS;
+const PLAYER_FOLLOW_THROUGH_MS = 45;
+const PLAYER_RECOVERY_MS = 120;
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 // 골드는 데미지의 0.75제곱 — 데미지 성장 대비 수입은 완만하게
 const goldFor = (S, dmg) => Math.max(1, Math.round(Math.pow(dmg, 0.75) * BAGS[S.activeBag].goldMul * skinBonus(S) * (goldBoostActive(S) ? 2 : 1)));
@@ -562,6 +572,7 @@ function Game() {
   const [playerPose, setPlayerPose] = useState('idle');
   const [foePose, setFoePose] = useState('idle');
   const [bagPose, setBagPose] = useState('normal');
+  const [impactCrit, setImpactCrit] = useState(false);
   const [showResult, setShowResult] = useState(false);
   const [foePickerOpen, setFoePickerOpen] = useState(false); // 샌드박스 상대 교체 드롭박스
   const [showSettings, setShowSettings] = useState(false);
@@ -585,8 +596,14 @@ function Game() {
   const stageShake = useRef(new Animated.Value(0)).current;
   const stageZoom = useRef(new Animated.Value(1)).current;
   const flashAnim = useRef(new Animated.Value(0)).current;
+  const impactAnim = useRef(new Animated.Value(0)).current;
   const attackPhaseTimer = useRef(null); // windup → slap 프레임 전환 타이머
+  const playerContactTimer = useRef(null);
+  const playerFollowTimer = useRef(null);
+  const playerRecoveryTimer = useRef(null);
   const foePhaseTimer = useRef(null);
+  const foeContactTimer = useRef(null);
+  const foeRecoveryTimer = useRef(null);
   const playerPoseTimer = useRef(null);
   const foePoseTimer = useRef(null);
   const foeFlickerTimer = useRef(null);
@@ -602,6 +619,8 @@ function Game() {
   const foePosePriorityRef = useRef(POSE_PRIORITY.idle);
   const playerAttackIndex = useRef(0);
   const foeAttackHandIndex = useRef(0);
+  const playerAttackLocked = useRef(false);
+  const foeAttackLocked = useRef(false);
 
   /* 저장/불러오기 */
   useEffect(() => {
@@ -836,7 +855,12 @@ function Game() {
       clearTimeout(bagBreakTimer.current);
       clearTimeout(resultTimer.current);
       clearTimeout(attackPhaseTimer.current);
+      clearTimeout(playerContactTimer.current);
+      clearTimeout(playerFollowTimer.current);
+      clearTimeout(playerRecoveryTimer.current);
       clearTimeout(foePhaseTimer.current);
+      clearTimeout(foeContactTimer.current);
+      clearTimeout(foeRecoveryTimer.current);
     };
   }, []);
 
@@ -869,6 +893,14 @@ function Game() {
     Animated.sequence([
       Animated.timing(stageZoom, { toValue: crit ? 1.08 : 1.05, duration: 50, useNativeDriver: true }),
       Animated.timing(stageZoom, { toValue: 1, duration: 100, useNativeDriver: true }),
+    ]).start();
+    setImpactCrit(crit);
+    impactAnim.stopAnimation();
+    impactAnim.setValue(0);
+    Animated.sequence([
+      Animated.timing(impactAnim, { toValue: 1, duration: 28, useNativeDriver: true }),
+      Animated.delay(crit ? 65 : 40),
+      Animated.timing(impactAnim, { toValue: 0, duration: 90, useNativeDriver: true }),
     ]).start();
     if (crit) {
       flashAnim.setValue(0.5);
@@ -911,23 +943,44 @@ function Game() {
     return true;
   }, []);
 
-  /* 공격 2단 모션: 크게 젖히는 windup(100ms) → 풀스윙 slap. 정타는 spin 팔로스루로 과장 */
-  const playPlayerAttack = useCallback((crit = false) => {
-    const side = playerAttackIndex.current % 2 ? 'Right' : 'Left';
-    if (!holdPlayerPose(`windup${side}`, crit ? 360 : 290)) return false;
+  /* 손이 실제로 닿는 한 지점에서 피격·소리·데미지를 함께 발생시킨다. */
+  const playPlayerAttack = useCallback((crit = false, onContact = null) => {
+    if (playerAttackLocked.current) return false;
+    const side = playerAttackIndex.current % 2 ? 'Left' : 'Right';
+    if (!holdPlayerPose(`windup${side}`, crit ? 380 : 315)) return false;
+    playerAttackLocked.current = true;
     playerAttackIndex.current++;
     clearTimeout(attackPhaseTimer.current);
+    clearTimeout(playerContactTimer.current);
+    clearTimeout(playerFollowTimer.current);
+    clearTimeout(playerRecoveryTimer.current);
     attackPhaseTimer.current = setTimeout(() => {
       attackPhaseTimer.current = null;
-      holdPlayerPose(crit ? 'spin' : `slap${side}`, crit ? 250 : 180);
-    }, 100);
+      holdPlayerPose(`slap${side}`, crit ? 270 : 220);
+    }, PLAYER_WINDUP_MS);
+    playerContactTimer.current = setTimeout(() => {
+      playerContactTimer.current = null;
+      onContact?.();
+    }, PLAYER_CONTACT_MS);
+    if (crit) {
+      playerFollowTimer.current = setTimeout(() => {
+        playerFollowTimer.current = null;
+        holdPlayerPose('spin', 170);
+      }, PLAYER_CONTACT_MS + PLAYER_FOLLOW_THROUGH_MS);
+    }
+    const totalMs = PLAYER_CONTACT_MS
+      + (crit ? PLAYER_FOLLOW_THROUGH_MS + 170 : PLAYER_RECOVERY_MS);
+    playerRecoveryTimer.current = setTimeout(() => {
+      playerRecoveryTimer.current = null;
+      playerAttackLocked.current = false;
+    }, totalMs);
     charAnim.stopAnimation();
     charAnim.setValue(0);
     Animated.sequence([
-      Animated.timing(charAnim, { toValue: -1, duration: 110, useNativeDriver: true }), // 크게 젖히고
-      Animated.timing(charAnim, { toValue: 1, duration: 55, useNativeDriver: true }),   // 풀스윙
-      Animated.delay(crit ? HIT_STOP_CRIT_MS : HIT_STOP_MS),                            // 뺨에 손이 꽂힌 채 멈칫
-      Animated.timing(charAnim, { toValue: 0, duration: crit ? 190 : 120, useNativeDriver: true }),
+      Animated.timing(charAnim, { toValue: -1, duration: PLAYER_WINDUP_MS, useNativeDriver: true }),
+      Animated.timing(charAnim, { toValue: 1, duration: PLAYER_SWING_MS, useNativeDriver: true }),
+      Animated.delay(crit ? HIT_STOP_CRIT_MS : HIT_STOP_MS),
+      Animated.timing(charAnim, { toValue: 0, duration: crit ? 160 : PLAYER_RECOVERY_MS, useNativeDriver: true }),
     ]).start();
     return true;
   }, [holdPlayerPose]);
@@ -976,83 +1029,86 @@ function Game() {
     if (now - lastBagHitAt.current < BAG_HIT_THROTTLE_MS) return false;
     lastBagHitAt.current = now;
     clearTimeout(bagPoseTimer.current);
-    // 새 연출: 머리만 뒤로 젖혀지는 headback 프레임 (PNG 자체에 반동이 있어 베이스는 고정)
-    setBagPose('headback');
-    const timer = setTimeout(() => {
-      if (bagPoseTimer.current !== timer) return;
-      bagPoseTimer.current = null;
-      setBagPose('normal');
-    }, BAG_HEADBACK_MS);
-    bagPoseTimer.current = timer;
+    setBagPose('hit');
+    const hitTimer = setTimeout(() => {
+      if (bagPoseTimer.current !== hitTimer) return;
+      setBagPose('headback');
+      const reboundTimer = setTimeout(() => {
+        if (bagPoseTimer.current !== reboundTimer) return;
+        bagPoseTimer.current = null;
+        setBagPose('normal');
+      }, BAG_HEADBACK_MS);
+      bagPoseTimer.current = reboundTimer;
+    }, BAG_HIT_HOLD_MS);
+    bagPoseTimer.current = hitTimer;
+    bagAnim.stopAnimation();
+    bagAnim.setValue(0);
+    Animated.sequence([
+      Animated.timing(bagAnim, { toValue: 12, duration: 45, useNativeDriver: true }),
+      Animated.timing(bagAnim, { toValue: -4, duration: 70, useNativeDriver: true }),
+      Animated.spring(bagAnim, { toValue: 0, friction: 5, tension: 150, useNativeDriver: true }),
+    ]).start();
     return true;
   }, []);
-
-  const punchAnimate = useCallback((crit = false) => {
-    if (!playPlayerAttack(crit)) return false;
-    playBagHit();
-    return true;
-  }, [playPlayerAttack, playBagHit]);
 
   /* ── 수련: 펀치 ── */
   const punch = useCallback((auto = false) => {
     if (inBattle) return;
     if (bagBrokenRef.current) return; // 격파 연출 중 입력 잠금 (수동·자동 공통)
     if (Date.now() < stunnedUntil.current) return;
-    // 경고 시작 후 350ms는 반응 유예 — 관성 클릭으로 반격당하는 억울함 방지
-    if (!auto && warningRef.current && Date.now() - warningStartedAt.current > 350) punchedInWarningRef.current = true;
     const bag = BAGS[S.activeBag];
     let dmg = baseDamage(S) * (auto ? 0.5 : 1);
     const crit = Math.random() * 100 < critPct(S);
     if (crit) dmg *= critMul(S);
     dmg = Math.max(1, Math.round(dmg));
     if (oneShotActive(S)) dmg = Math.max(dmg, S.bagHp); // 샌드백 한 방 버프: 남은 내구도만큼 확정 데미지
-
-    S.punches++;
-    S.bagHp -= dmg;
-    S.gold += goldFor(S, dmg);
-
-    // 쌀알이 공격 모션 + 비품 피격 반응은 자동 슬랩에서도 항상 재생 (자동 캡 2회/초라 연출이 따라감)
-    // 공격 모션이 다른 포즈에 막히면 비품 반응만이라도 표시
-    if (!punchAnimate(crit)) playBagHit();
-    if (!auto || crit) impactFx(crit); // 셰이크·줌·플래시 — 자동 슬랩은 정타만 (상시 흔들림 방지)
-    playPunchSfx(S.punchSfx, S.sfxVolume); // 자동 슬랩 포함 모든 타격에 재생
-    if (!auto || Math.random() < 0.3) {
-      addFloat(crit ? `찰싹!! ${fmt(dmg)}` : fmt(dmg), crit ? 'crit' : 'normal');
-      if (!auto) {
-        Haptics.impactAsync(crit ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    const attackAccepted = playPlayerAttack(crit, () => {
+      if (bagBrokenRef.current) return;
+      S.punches++;
+      S.bagHp -= dmg;
+      S.gold += goldFor(S, dmg);
+      playBagHit();
+      if (!auto || crit) impactFx(crit);
+      playPunchSfx(S.punchSfx, S.sfxVolume);
+      if (!auto || Math.random() < 0.3) {
+        addFloat(crit ? `찰싹!! ${fmt(dmg)}` : fmt(dmg), crit ? 'crit' : 'normal');
+        if (!auto) {
+          Haptics.impactAsync(crit ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+        }
       }
-    }
 
-    if (S.bagHp <= 0) {
-      // 격파: HP 0 고정 + X눈 프레임 800ms 유지 후 같은 티어 새 샌드백 등장
-      S.bagHp = 0;
-      bagBrokenRef.current = true;
-      clearTimeout(bagPoseTimer.current);
-      bagPoseTimer.current = null;
-      clearTimeout(bagBreakTimer.current);
-      setBagPose('broken');
-      const bonus = Math.round(Math.pow(bag.hp, 0.75) * bag.goldMul * 2 * skinBonus(S) * (goldBoostActive(S) ? 2 : 1));
-      S.gold += bonus;
-      impactFx(true); // 박살 순간은 무조건 강한 셰이크
-      addFloat(`박살 보너스 +${fmt(bonus)}`, 'bonus', 'right', ICONS.breakBonus);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      // 샌드백 20개 격파마다 전면 광고 (광고 제거 구매 시 없음)
-      bagBreakCount.current++;
-      if (!S.adFree && bagBreakCount.current % 20 === 0) showInterstitial();
-      save();
-      const timer = setTimeout(() => {
-        if (bagBreakTimer.current !== timer) return;
-        bagBreakTimer.current = null;
-        bagBrokenRef.current = false;
-        S.bagHp = BAGS[S.activeBag].hp;
-        setBagPose('normal');
+      if (S.bagHp <= 0) {
+        S.bagHp = 0;
+        bagBrokenRef.current = true;
+        clearTimeout(bagPoseTimer.current);
+        bagPoseTimer.current = null;
+        clearTimeout(bagBreakTimer.current);
+        setBagPose('broken');
+        const bonus = Math.round(Math.pow(bag.hp, 0.75) * bag.goldMul * 2 * skinBonus(S) * (goldBoostActive(S) ? 2 : 1));
+        S.gold += bonus;
+        impactFx(true);
+        addFloat(`박살 보너스 +${fmt(bonus)}`, 'bonus', 'right', ICONS.breakBonus);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        bagBreakCount.current++;
+        if (!S.adFree && bagBreakCount.current % 20 === 0) showInterstitial();
         save();
-        rerender();
-      }, BAG_BREAK_MS);
-      bagBreakTimer.current = timer;
-    }
-    rerender();
-  }, [inBattle, addFloat, punchAnimate, playBagHit, impactFx, rerender, save, showInterstitial]);
+        const timer = setTimeout(() => {
+          if (bagBreakTimer.current !== timer) return;
+          bagBreakTimer.current = null;
+          bagBrokenRef.current = false;
+          S.bagHp = BAGS[S.activeBag].hp;
+          setBagPose('normal');
+          save();
+          rerender();
+        }, BAG_BREAK_MS);
+        bagBreakTimer.current = timer;
+      }
+      rerender();
+    });
+    if (!attackAccepted) return;
+    // 경고 시작 후 350ms는 반응 유예 — 실제로 시작된 공격만 반격 판정에 포함한다.
+    if (!auto && warningRef.current && Date.now() - warningStartedAt.current > 350) punchedInWarningRef.current = true;
+  }, [inBattle, addFloat, playPlayerAttack, playBagHit, impactFx, rerender, save, showInterstitial]);
   const punchRef = useRef(punch);
   punchRef.current = punch;
 
@@ -1109,6 +1165,13 @@ function Game() {
     clearTimeout(foeFlickerTimer.current);
     clearTimeout(foeCounterTimer.current);
     clearTimeout(resultTimer.current);
+    clearTimeout(attackPhaseTimer.current);
+    clearTimeout(playerContactTimer.current);
+    clearTimeout(playerFollowTimer.current);
+    clearTimeout(playerRecoveryTimer.current);
+    clearTimeout(foePhaseTimer.current);
+    clearTimeout(foeContactTimer.current);
+    clearTimeout(foeRecoveryTimer.current);
     playerPoseTimer.current = null;
     foePoseTimer.current = null;
     foeFlickerTimer.current = null;
@@ -1125,6 +1188,8 @@ function Game() {
     foePosePriorityRef.current = POSE_PRIORITY.idle;
     playerAttackIndex.current = 0;
     foeAttackHandIndex.current = 0;
+    playerAttackLocked.current = false;
+    foeAttackLocked.current = false;
     setPlayerPose('idle');
     setFoePose('idle');
     setWarning(false);
@@ -1202,6 +1267,13 @@ function Game() {
     clearTimeout(foeFlickerTimer.current);
     clearTimeout(foeCounterTimer.current);
     clearTimeout(resultTimer.current);
+    clearTimeout(attackPhaseTimer.current);
+    clearTimeout(playerContactTimer.current);
+    clearTimeout(playerFollowTimer.current);
+    clearTimeout(playerRecoveryTimer.current);
+    clearTimeout(foePhaseTimer.current);
+    clearTimeout(foeContactTimer.current);
+    clearTimeout(foeRecoveryTimer.current);
     playerPoseTimer.current = null;
     foePoseTimer.current = null;
     foeFlickerTimer.current = null;
@@ -1382,6 +1454,8 @@ function Game() {
     foePosePriorityRef.current = POSE_PRIORITY.idle;
     playerAttackIndex.current = 0;
     foeAttackHandIndex.current = 0;
+    playerAttackLocked.current = false;
+    foeAttackLocked.current = false;
     setPlayerPose('idle');
     setFoePose('idle');
     setShowResult(false);
