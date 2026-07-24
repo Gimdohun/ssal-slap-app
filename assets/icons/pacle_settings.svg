@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-hidden="true">
+  <g vector-effect="non-scaling-stroke">
+
+    <circle fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" cx="64" cy="64" r="14"/>
+    <path fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" d="M64 22 L69 35 Q76 37 81 41 L95 37 L104 52 L94 62 Q95 68 94 74 L104 84 L95 99 L81 95 Q76 100 69 102 L64 115 L46 115 L41 102 Q34 100 29 96 L15 100 L6 84 L16 74 Q15 68 16 62 L6 52 L15 37 L29 41 Q34 37 41 35 L46 22 Z"/>
+
+  </g>
+</svg>

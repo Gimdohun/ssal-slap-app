@@ -1,0 +1,23 @@
+node_modules/
+.expo/
+dist/
+tmp/
+*.log
+.DS_Store
+expo_qr.png
+.omx/
+
+# 로컬 빌드 산출물 (android/ 소스는 커밋, 빌드 결과물만 제외)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# 서명 키 — 절대 커밋 금지 (분실 시 앱 업데이트 불가이니 로컬 백업 필수)
+android/app/upload-key.keystore
+upload-key-credentials.txt
+
+# 배포 산출물 (GitHub 100MB 제한)
+*.apk
+*.aab
+*.zip
