@@ -9,13 +9,15 @@ slap_king issue) from becoming an opaque line in a runtime sprite.
 from __future__ import annotations
 
 import argparse
+from collections import Counter, deque
 from pathlib import Path
 import shutil
+from statistics import median
 import subprocess
 import sys
 import tempfile
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -120,24 +122,107 @@ def _pick_grid_bands(
 
 
 def _cell_intervals(
-    length: int, bands: tuple[tuple[int, int], tuple[int, int]]
+    length: int,
+    bands: tuple[tuple[int, int], tuple[int, int]],
+    all_bands: list[tuple[int, int]] | None = None,
 ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
     outer_inset = 4
-    gutter_inset = 2
+    # Leave a few pixels beyond the detected white divider. ImageGen can
+    # feather a divider corner just outside the mostly-white band; without
+    # this margin that residue becomes a detached white speck or line.
+    gutter_inset = 4
     first, second = bands
+    outer_start = outer_inset
+    outer_end = length - outer_inset
+    if all_bands:
+        leading = next((band for band in all_bands if band[0] <= 2), None)
+        trailing = next(
+            (band for band in reversed(all_bands) if band[1] >= length - 3),
+            None,
+        )
+        if leading:
+            outer_start = leading[1] + 1 + gutter_inset
+        if trailing:
+            outer_end = trailing[0] - gutter_inset
     intervals = (
-        (outer_inset, first[0] - gutter_inset),
+        (outer_start, first[0] - gutter_inset),
         (first[1] + 1 + gutter_inset, second[0] - gutter_inset),
-        (second[1] + 1 + gutter_inset, length - outer_inset),
+        (second[1] + 1 + gutter_inset, outer_end),
     )
     if any(end <= start for start, end in intervals):
         raise RuntimeError(f"Invalid cell intervals: {intervals}")
     return intervals
 
 
+def _equal_cell_intervals(length: int) -> tuple[tuple[int, int], ...]:
+    """Fallback for older atlases whose three cells share one chroma field."""
+
+    boundaries = (0, round(length / 3), round(length * 2 / 3), length)
+    inset = max(3, round(length / 384))
+    intervals = tuple(
+        (boundaries[index] + inset, boundaries[index + 1] - inset)
+        for index in range(3)
+    )
+    if any(end <= start for start, end in intervals):
+        raise RuntimeError(f"Invalid equal-third cell intervals: {intervals}")
+    return intervals
+
+
+def _sample_chroma_key(source: Path) -> tuple[int, int, int]:
+    """Find the saturated backdrop without averaging white frame pixels.
+
+    Some generated atlases have a thin white outer frame.  Sampling the raw
+    border in those cells produces a pale key color and can make the whole
+    character partially transparent.  The backdrop still dominates the
+    saturated border pixels, so select their largest quantized color cluster.
+    This also supports the magenta key used by the brown-rice atlas.
+    """
+
+    with Image.open(source).convert("RGB") as image:
+        width, height = image.size
+        pixels = image.load()
+        band = max(6, min(width, height) // 32)
+        saturated: list[tuple[int, int, int]] = []
+        for y in range(height):
+            for x in range(width):
+                if band <= x < width - band and band <= y < height - band:
+                    continue
+                red, green, blue = pixels[x, y]
+                if (
+                    max(red, green, blue) >= 128
+                    and max(red, green, blue) - min(red, green, blue) >= 48
+                ):
+                    saturated.append((red, green, blue))
+
+        if not saturated:
+            raise RuntimeError(f"Could not sample a saturated chroma key from {source}")
+
+        cluster_counts = Counter(
+            (red // 16, green // 16, blue // 16)
+            for red, green, blue in saturated
+        )
+        dominant = cluster_counts.most_common(1)[0][0]
+        samples = [
+            pixel
+            for pixel in saturated
+            if all(
+                abs(pixel[channel] // 16 - dominant[channel]) <= 1
+                for channel in range(3)
+            )
+        ]
+        return tuple(
+            int(round(median(pixel[channel] for pixel in samples)))
+            for channel in range(3)
+        )
+
+
 def _remove_chroma(
-    source: Path, destination: Path, chroma_helper: Path
+    source: Path,
+    destination: Path,
+    chroma_helper: Path,
+    preserve_enclosed_key_colors: bool,
 ) -> None:
+    key = _sample_chroma_key(source)
     subprocess.run(
         [
             sys.executable,
@@ -146,16 +231,123 @@ def _remove_chroma(
             str(source),
             "--out",
             str(destination),
-            "--auto-key",
-            "border",
-            "--soft-matte",
-            "--despill",
-            "--edge-contract",
-            "1",
+            "--key-color",
+            f"#{key[0]:02x}{key[1]:02x}{key[2]:02x}",
+            "--tolerance",
+            "80",
             "--force",
         ],
         check=True,
     )
+    if preserve_enclosed_key_colors:
+        _restore_enclosed_key_colors(source, destination)
+    _contract_and_despill_matte(destination, key)
+
+
+def _restore_enclosed_key_colors(source: Path, matte_path: Path) -> None:
+    """Keep key-colored costume/body regions that are enclosed by an outline.
+
+    A hard color key alone removes the pea pod and other green character parts.
+    True backdrop pixels form one component connected to the cell border, while
+    those character colors sit inside the black silhouette.  Retain only the
+    border-connected transparent component, then contract it by one pixel to
+    remove the remaining chroma fringe.
+    """
+
+    with Image.open(source).convert("RGBA") as original, Image.open(
+        matte_path
+    ).convert("RGBA") as keyed:
+        width, height = original.size
+        keyed_alpha = keyed.getchannel("A")
+        flattened = getattr(keyed_alpha, "get_flattened_data", None)
+        keyed_values = flattened() if flattened else keyed_alpha.getdata()
+        candidates = bytearray(1 if alpha == 0 else 0 for alpha in keyed_values)
+        outside = bytearray(width * height)
+        queue: deque[int] = deque()
+
+        def add_seed(x: int, y: int) -> None:
+            index = y * width + x
+            if candidates[index] and not outside[index]:
+                outside[index] = 1
+                queue.append(index)
+
+        for x in range(width):
+            add_seed(x, 0)
+            add_seed(x, height - 1)
+        for y in range(height):
+            add_seed(0, y)
+            add_seed(width - 1, y)
+
+        while queue:
+            index = queue.popleft()
+            x = index % width
+            y = index // width
+            for next_x, next_y in (
+                (x - 1, y),
+                (x + 1, y),
+                (x, y - 1),
+                (x, y + 1),
+                (x - 1, y - 1),
+                (x + 1, y - 1),
+                (x - 1, y + 1),
+                (x + 1, y + 1),
+            ):
+                if not (0 <= next_x < width and 0 <= next_y < height):
+                    continue
+                next_index = next_y * width + next_x
+                if candidates[next_index] and not outside[next_index]:
+                    outside[next_index] = 1
+                    queue.append(next_index)
+
+        outside_count = sum(outside)
+        if outside_count < width * height * 0.2:
+            raise RuntimeError(
+                f"Border-connected chroma area is unexpectedly small in {source}: "
+                f"{outside_count}/{width * height}"
+            )
+
+        alpha = Image.new("L", (width, height), 255)
+        alpha.putdata([0 if transparent else 255 for transparent in outside])
+        original.putalpha(alpha)
+        original.save(matte_path, format="PNG", optimize=True)
+
+
+def _contract_and_despill_matte(
+    matte_path: Path, key: tuple[int, int, int]
+) -> None:
+    """Remove the final one-pixel key fringe without tinting the silhouette."""
+
+    with Image.open(matte_path).convert("RGBA") as image:
+        alpha = image.getchannel("A").filter(ImageFilter.MinFilter(3))
+        image.putalpha(alpha)
+        near_background = alpha.filter(ImageFilter.MinFilter(5))
+        pixels = image.load()
+        near_pixels = near_background.load()
+        width, height = image.size
+
+        key_max = max(key)
+        spill_channels = [
+            channel
+            for channel, value in enumerate(key)
+            if value >= 128 and value >= key_max - 16
+        ]
+        other_channels = [
+            channel for channel in range(3) if channel not in spill_channels
+        ]
+
+        for y in range(height):
+            for x in range(width):
+                red, green, blue, pixel_alpha = pixels[x, y]
+                if pixel_alpha == 0 or near_pixels[x, y] == 255:
+                    continue
+                channels = [red, green, blue]
+                anchor = max(channels[channel] for channel in other_channels)
+                for channel in spill_channels:
+                    if channels[channel] > anchor + 6:
+                        channels[channel] = anchor
+                pixels[x, y] = (*channels, pixel_alpha)
+
+        image.save(matte_path, format="PNG", optimize=True)
 
 
 def _normalize(source: Path, destination: Path) -> None:
@@ -184,13 +376,25 @@ def _rebuild_atlas(
     atlas_path: Path,
     output_paths: list[Path],
     chroma_helper: Path,
+    *,
+    preserve_enclosed_key_colors: bool = False,
 ) -> None:
     with Image.open(atlas_path).convert("RGBA") as atlas:
         width, height = atlas.size
-        vertical = _pick_grid_bands(_white_bands(atlas, vertical=True), width)
-        horizontal = _pick_grid_bands(_white_bands(atlas, vertical=False), height)
-        columns = _cell_intervals(width, vertical)
-        rows = _cell_intervals(height, horizontal)
+        try:
+            vertical_bands = _white_bands(atlas, vertical=True)
+            vertical = _pick_grid_bands(vertical_bands, width)
+            columns = _cell_intervals(width, vertical, vertical_bands)
+        except RuntimeError:
+            vertical = None
+            columns = _equal_cell_intervals(width)
+        try:
+            horizontal_bands = _white_bands(atlas, vertical=False)
+            horizontal = _pick_grid_bands(horizontal_bands, height)
+            rows = _cell_intervals(height, horizontal, horizontal_bands)
+        except RuntimeError:
+            horizontal = None
+            rows = _equal_cell_intervals(height)
 
         print(
             f"{atlas_path.name}: size={width}x{height}, "
@@ -206,7 +410,12 @@ def _rebuild_atlas(
                 crop_path = temp_dir / f"{index:02d}-crop.png"
                 matte_path = temp_dir / f"{index:02d}-matte.png"
                 atlas.crop((left, top, right, bottom)).save(crop_path, "PNG")
-                _remove_chroma(crop_path, matte_path, chroma_helper)
+                _remove_chroma(
+                    crop_path,
+                    matte_path,
+                    chroma_helper,
+                    preserve_enclosed_key_colors,
+                )
                 _normalize(matte_path, output_path)
 
 

@@ -3,6 +3,15 @@
 Generated with the built-in `image_gen` tool on 2026-07-24 and white-tone
 corrected with the same built-in tool on 2026-07-25.
 
+## Fixed battle-side direction revision (2026-07-25)
+
+The runtime player is always on the left side of the stage. Every pose now
+keeps a three-quarter **screen-right** orientation toward the opponent. The two
+windups alternate arms but pull the striking hand toward screen-left/back, and
+both slap poses travel toward screen-right. `hit` recoils screen-left, while
+`dodge` retreats screen-left without looking away from the opponent. Do not
+mirror an entire pose merely to switch hands.
+
 ## Inputs
 
 - `C:/team-project/ssal-fighter-app/assets/icon.png`: primary identity and emotional-style anchor
@@ -26,7 +35,8 @@ The slap must travel laterally into an off-screen opponent with a curved coral m
 
 - Source atlas: `player_base_atlas.png`
 - Runtime cells: 512x512 RGBA
-- Background removal: installed `remove_chroma_key.py` helper with soft matte, despill, and one-pixel edge contraction
+- Background removal: installed `remove_chroma_key.py` helper with a sampled
+  saturated key, hard tolerance, one-pixel contraction, and boundary despill
 - All four corners and the outer two-pixel border must have alpha 0
 - Rebuild command: `py -3 rebuild_runtime_sprites.py`
 - Grid dividers are detected from their actual pixels; the rebuild never assumes equal thirds

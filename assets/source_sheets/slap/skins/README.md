@@ -6,6 +6,15 @@ The original rice character at
 `C:/team-project/ssal-fighter-app/assets/icon.png` and the canonical player
 atlas at `../player_base_atlas.png` were used as the visual references.
 
+## Fixed battle-side direction
+
+The player is rendered on the left side of every battle and must face
+three-quarter **screen-right** in every cell. `windup_right` and `windup_left`
+alternate the striking arm while pulling it toward screen-left/back;
+`slap_right` and `slap_left` both strike screen-right with their motion arcs on
+the right. `hit` recoils screen-left and `dodge` retreats screen-left while
+watching screen-right. Never mirror the whole character to switch hands.
+
 ## Shared final prompt
 
 Create one square 3x3 sprite atlas for the same cute Korean rice-grain mascot.
@@ -57,12 +66,12 @@ green reflections on the character.
 ## Post-processing
 
 Each atlas is cropped cell-by-cell with a small inset, passed through the
-ImageGen skill chroma-key helper using soft matte/despill and one-pixel edge
-contraction, normalized to 500 px, and padded transparently to 512x512. The
-rebuild script detects the two real divider bands on each axis instead of using
-equal thirds, preventing shifted white gutters from entering runtime sprites.
-The nine pose files and wardrobe thumbnail use those normalized transparent
-sprites.
+ImageGen skill chroma-key helper using a sampled saturated key and hard
+tolerance, contracted by one pixel, boundary-despilled, normalized to 500 px,
+and padded transparently to 512x512. The rebuild script detects the two real
+divider bands on each axis instead of using equal thirds, preventing shifted
+white gutters from entering runtime sprites. The nine pose files and wardrobe
+thumbnail use those normalized transparent sprites.
 
 Run from `assets/source_sheets/slap`:
 
