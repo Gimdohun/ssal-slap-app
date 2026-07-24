@@ -57,9 +57,11 @@ let currentBgmKey = null;
 function playBgm(key, volume) {
   try {
     if (currentBgmKey === key) { setBgmVolume(volume); return; }
-    // 대련 종료 등 곡 전환 시 추적이 어긋난 플레이어가 남지 않도록 대상 외 전부 정지
+    // 곡 전환 시 대상 외 플레이어는 정지 + 볼륨 0 — pause가 native에서 실패해도 겹쳐 들리지 않게
     Object.keys(bgmPlayers).forEach(k => {
-      if (k !== key) { try { bgmPlayers[k].pause(); } catch (e) { /* noop */ } }
+      if (k !== key) {
+        try { bgmPlayers[k].volume = 0; bgmPlayers[k].pause(); } catch (e) { /* noop */ }
+      }
     });
     if (!bgmPlayers[key]) {
       const np = createAudioPlayer(BGM_TRACKS[key]);
@@ -80,10 +82,10 @@ function playBgm(key, volume) {
   } catch (e) { /* 사운드 실패는 게임 진행에 영향 없음 */ }
 }
 function setBgmVolume(volume) {
-  // 현재 곡만이 아니라 캐시된 모든 플레이어에 적용 — 남아 있는 곡도 확실히 음소거
+  // 현재 곡에만 사용자 볼륨 적용, 나머지는 항상 0 — 남은 곡이 어떤 상태든 무음 보장
   const v = Math.max(0, Math.min(1, volume));
-  Object.values(bgmPlayers).forEach(p => {
-    try { p.volume = v; } catch (e) { /* noop */ }
+  Object.keys(bgmPlayers).forEach(k => {
+    try { bgmPlayers[k].volume = k === currentBgmKey ? v : 0; } catch (e) { /* noop */ }
   });
 }
 
