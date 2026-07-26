@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "app.ssalslap.mobile",
-      "buildNumber": "2"
+      "buildNumber": "3"
     },
     "android": {
       "package": "app.ssalslap.mobile",
@@ -26,7 +26,13 @@
       }
     },
     "plugins": [
-      "expo-audio",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
       "expo-iap",
       [
         "react-native-google-mobile-ads",
