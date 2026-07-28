@@ -401,8 +401,8 @@ const AD_FREE_SKU = IAP_SKU_PREFIX + 'ad_free';
 const AD_UNIT_INTERSTITIAL = __DEV__
   ? TestIds.INTERSTITIAL
   : Platform.select({
-      ios: 'ca-app-pub-8467967363800822/5792957116',
-      android: 'ca-app-pub-8467967363800822/7944211800',
+      ios: 'ca-app-pub-1447190695017955/9620746827',
+      android: 'ca-app-pub-1447190695017955/5798865972',
     });
 const goldBoostActive = S => Date.now() < S.goldBoostUntil;
 const oneShotActive   = S => Date.now() < S.oneShotUntil;
